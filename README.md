@@ -84,7 +84,7 @@ designing-ai-agents/
 ├── ch09-governance/         Ch9 — Argus += trust accounting + audit chain
 ├── ch10-methodology/        Ch10 — capstone: orchestrator + 4 end-to-end demos
 ├── tools/smoke_test.py      Smoke test runner (import-clean across all chapters)
-└── docs/                    Book card + blueprint + design notes
+└── docs/                    Book card image
 ```
 
 Inside every `chNN-*/`:
