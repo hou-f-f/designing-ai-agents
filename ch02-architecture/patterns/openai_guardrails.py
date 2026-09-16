@@ -1,14 +1,72 @@
+# =============================================================================
+# patterns/openai_guardrails.py — 护栏模式（Guardrails Pattern）
+#
+# 【学习目标】
+#   理解如何给 Agent 加上安全检查，防止不合规的输入进来、不合规的输出出去。
+#
+# 【什么是护栏（Guardrail）？】
+#   护栏 = 给 Agent 套上规则，在输入和输出两个关口做检查。
+#   就像工厂质检：进料检查（输入护栏）+ 出货检查（输出护栏）。
+#
+# 【注意】
+#   no_pii_in_prompts、topic_within_scope 等函数在本文件中未定义，
+#   是占位符，生产环境需要自己实现具体的检查逻辑。
+# =============================================================================
+
 from agents import Agent, InputGuardrail, OutputGuardrail
 
+# =============================================================================
+# 创建一个带护栏的客服 Agent
+# 【说明】
+#   这个例子不是 Argus，而是一个客服场景，更容易理解护栏的实际用途。
+# =============================================================================
 agent = Agent(
     name="customer_service",
-    instructions="Help customers with billing questions.",
-    input_guardrails=[  #A
-        InputGuardrail(no_pii_in_prompts),
-        InputGuardrail(topic_within_scope),
+    instructions="Help customers with billing questions.",  # 只处理账单问题
+
+    # -------------------------------------------------------------------------
+    # #A 输入护栏：用户消息进来之前先过滤
+    # 【说明】
+    #   每条用户消息都会依次经过这些检查，任何一个不通过就拒绝。
+    #
+    #   no_pii_in_prompts  - 检查用户输入里有没有个人隐私信息
+    #                        （如身份证号、信用卡号），防止数据泄露
+    #   topic_within_scope - 检查问题是不是账单相关，
+    #                        不相关的问题直接拒绝，防止 Agent 被滥用
+    # -------------------------------------------------------------------------
+    input_guardrails=[
+        InputGuardrail(no_pii_in_prompts),   # 🔒 隐私过滤
+        InputGuardrail(topic_within_scope),  # 🔒 话题限制
     ],
-    output_guardrails=[  #B
-        OutputGuardrail(no_hallucinated_prices),
-        OutputGuardrail(professional_tone),
+
+    # -------------------------------------------------------------------------
+    # #B 输出护栏：Agent 的回答出去之前先过滤
+    # 【说明】
+    #   Agent 生成的回答也需要检查，防止产生有害内容。
+    #
+    #   no_hallucinated_prices - 检查回答里的价格是否真实存在于数据库，
+    #                            防止 LLM 捏造不存在的优惠或价格
+    #   professional_tone      - 检查语气是否专业，
+    #                            不能出现侮辱性语言或过于随意的表达
+    # -------------------------------------------------------------------------
+    output_guardrails=[
+        OutputGuardrail(no_hallucinated_prices),  # 🔒 防止幻觉价格
+        OutputGuardrail(professional_tone),        # 🔒 语气检查
     ],
 )
+
+# =============================================================================
+# 【学习小结】
+#
+# 护栏的两种类型：
+#
+#   输入护栏（InputGuardrail）           输出护栏（OutputGuardrail）
+#   ┌─────────────────────┐             ┌─────────────────────┐
+#   │ 用户输入 → 检查 → Agent │   →   │ Agent输出 → 检查 → 用户 │
+#   └─────────────────────┘             └─────────────────────┘
+#   防止：垃圾进来、话题偏移             防止：幻觉输出、不当语气
+#
+# 护栏 vs 系统提示的区别：
+#   系统提示（instructions）：用自然语言"告诉"LLM 要怎么做，LLM 可能不遵守
+#   护栏（Guardrail）：用代码强制检查，不通过就拦截，不依赖 LLM 的自觉性
+# =============================================================================

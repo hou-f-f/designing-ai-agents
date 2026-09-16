@@ -1,30 +1,126 @@
+# =============================================================================
+# argus/runtime.py — Agent Runtime VM（概念性架构草图，不可独立运行）
+#
+# 【学习目标】
+#   理解 Agent 的"基础设施层"包含哪些组件，以及每个组件的职责。
+#   可以把 Runtime VM 想象成 Agent 的"操作系统"。
+#
+# 【注意】
+#   RuntimeConfig、Sandbox、StateManager 等类在本文件中未定义，
+#   这是书中的结构性伪代码，用于说明架构概念，不用于执行。
+#
+# 【与 core.py 的关系】
+#   core.py 是最简化的 Agent（没有基础设施）。
+#   真实生产环境的 Agent 需要这里描述的所有组件。
+# =============================================================================
+
+
 class AgentRuntime:
-    """Simplified Runtime VM — the infrastructure layer."""
+    """
+    【类说明】
+    Agent 的运行时环境，负责所有基础设施。
+
+    生产级 Agent 不能只有 LLM 调用，还需要：
+    安全隔离、状态持久化、工具管理、技能复用、可观测性。
+    这个类就是把这些能力统一管理的地方。
+    """
+
     def __init__(self, config: RuntimeConfig):
-        self.sandbox = Sandbox(  #A
-        config.isolation_level)
-        self.state = StateManager(  #B
-        config.persistence)
-        self.mcp_host = MCPHost(  #C
-        config.tool_servers)
-        self.skills = SkillRegistry(  #D
-        config.skill_dir)
-        self.monitor = ObservabilityLayer(  #E
-        config.metrics)
+        # ---------------------------------------------------------------------
+        # #A Sandbox（沙箱）：隔离执行环境
+        # 【说明】
+        #   Agent 可能会执行代码、调用命令，如果直接在宿主机上运行很危险。
+        #   沙箱把 Agent 的操作限制在一个隔离环境里，
+        #   即使 Agent 跑了恶意代码，也不会损坏真实系统。
+        #   isolation_level 控制隔离程度（容器/进程/虚拟机等）。
+        # ---------------------------------------------------------------------
+        self.sandbox = Sandbox(config.isolation_level)
+
+        # ---------------------------------------------------------------------
+        # #B StateManager（状态管理器）：持久化任务进度
+        # 【说明】
+        #   Agent 执行长任务时可能崩溃或被中断。
+        #   StateManager 定期保存"检查点"，重启后可以从上次中断的地方继续，
+        #   而不是从头开始。就像游戏的存档功能。
+        # ---------------------------------------------------------------------
+        self.state = StateManager(config.persistence)
+
+        # ---------------------------------------------------------------------
+        # #C MCPHost（MCP 工具服务器）：连接外部工具
+        # 【说明】
+        #   MCP = Model Context Protocol，Anthropic 定义的工具连接标准协议。
+        #   MCPHost 负责连接和管理外部工具服务器（如代码执行器、数据库、API 等），
+        #   Agent 通过它调用工具，不需要知道工具的具体实现细节。
+        # ---------------------------------------------------------------------
+        self.mcp_host = MCPHost(config.tool_servers)
+
+        # ---------------------------------------------------------------------
+        # #D SkillRegistry（技能注册表）：管理可复用技能
+        # 【说明】
+        #   技能是经过验证的、可复用的操作流程（如"如何重构函数"）。
+        #   类似于老工匠把经验写成操作手册，下次遇到同类问题直接查。
+        #   避免每次都让 LLM 从头思考相同的问题。
+        # ---------------------------------------------------------------------
+        self.skills = SkillRegistry(config.skill_dir)
+
+        # ---------------------------------------------------------------------
+        # #E ObservabilityLayer（可观测性层）：监控和日志
+        # 【说明】
+        #   记录 Agent 的每个操作，方便调试、审计和性能分析。
+        #   没有可观测性，Agent 出错了你不知道它做了什么，很难排查。
+        # ---------------------------------------------------------------------
+        self.monitor = ObservabilityLayer(config.metrics)
 
     def execute_action(self, action: AgentAction) -> ActionResult:
+        """
+        【方法说明】
+        执行一个 Agent 动作，完整流程：
+        记录开始 → 风险评估 → [人工审批] → 沙箱执行 → 保存检查点 → 记录完成
+
+        参数：
+            action - 要执行的动作（包含工具名和参数）
+
+        返回：
+            ActionResult - 执行结果（成功/失败/被阻止）
+        """
+        # 记录动作开始（方便后续审计和调试）
         self.monitor.log_action_start(action)
 
-        risk = self.classify_risk(action)  #F
+        # ---------------------------------------------------------------------
+        # #F 风险评估：判断这个动作有多危险
+        # 【说明】
+        #   不是所有动作都可以直接执行，比如：
+        #     - 删除文件  → 高风险，需要人工确认
+        #     - 读取文件  → 低风险，可以直接执行
+        #     - 发送邮件  → 中等风险，看情况
+        #   classify_risk 根据动作类型和参数判断风险等级。
+        # ---------------------------------------------------------------------
+        risk = self.classify_risk(action)
         if risk.requires_approval:
+            # 高风险操作：暂停，向人类请求审批
             approval = self.request_human_approval(action)
             if not approval.granted:
+                # 人类拒绝了，返回"被阻止"的结果
                 return ActionResult.blocked(approval.reason)
 
-        with self.sandbox.isolated_context():  #G
+        # ---------------------------------------------------------------------
+        # #G 在沙箱中执行：隔离执行，防止危险操作影响宿主系统
+        # 【说明】
+        #   with ... 是 Python 的上下文管理器语法，
+        #   进入 with 块时激活隔离环境，退出时自动清理。
+        #   mcp_host.resolve_tool 根据工具名找到对应的工具实现，
+        #   然后用 action.parameters 调用它。
+        # ---------------------------------------------------------------------
+        with self.sandbox.isolated_context():
             tool = self.mcp_host.resolve_tool(action.tool_name)
             result = tool.invoke(action.parameters)
 
-        self.state.checkpoint(action, result)  #H
+        # ---------------------------------------------------------------------
+        # #H 保存检查点：记录这次动作和结果
+        # 【说明】
+        #   checkpoint 把"做了什么"和"结果是什么"持久化保存，
+        #   崩溃恢复时可以知道已经做到哪一步了。
+        # ---------------------------------------------------------------------
+        self.state.checkpoint(action, result)
         self.monitor.log_action_complete(action, result)
         return result
